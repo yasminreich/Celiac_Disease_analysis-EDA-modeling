@@ -1,487 +1,849 @@
 ---
 title: "Celiac Disease Lab Data — EDA + Modeling"
 output:
-  html_document: default
-  pdf_document: default
+  github_document:
+    toc: true
+    toc_depth: 2
+  html_document:
+    toc: true
+    toc_float: true
 ---
+
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE,
+  fig.path = "figures/", dpi = 100
+)
 
-# Always use the clean library first (also during knitting)
-new_lib <- file.path(Sys.getenv("USERPROFILE"), "R", "win-library-clean", "4.3")
-dir.create(new_lib, recursive = TRUE, showWarnings = FALSE)
-.libPaths(c(new_lib, .libPaths()))
+library(tidyverse)   # data manipulation and plotting
+library(corrplot)    # correlation matrix visualisation
+library(C50)         # C5.0 decision trees
+library(gmodels)     # CrossTable
+library(class)       # knn
+library(tidymodels)  # random forest via parsnip/ranger, yardstick metrics
+library(vip)         # variable importance plots
 
-set.seed(123)
-
+set.seed(1234)
 ```
 
 ## Project Overview
 
-The goal of this project is to explore and model laboratory and clinical data related to celiac disease.  
+The goal of this project is to explore and model laboratory and clinical data related to celiac disease.
 Using a Kaggle dataset, the following steps were performed:
-- Exploratory data analysis (EDA)  
-- Feature engineering and data cleaning  
+
+- Exploratory data analysis (EDA)
+- Feature engineering and data cleaning
+- Dimensionality reduction (PCA)
 - Supervised learning using:
-  - Decision trees (C5.0)  
-  - k-nearest neighbors (KNN)  
-  - Random forest  
+  - Decision trees (C5.0)
+  - k-nearest neighbors (KNN)
+  - Random forest
 
-A key clinical motivation is minimizing false negatives, since missing a true celiac diagnosis may lead to delayed treatment and long-term complications.
+A key clinical motivation is minimizing **false negatives**, since missing a true celiac diagnosis may lead to
+delayed treatment and long-term complications.
 
+All three models are trained and scored on the **same train/test split** and the **same predictors**, so the
+comparison at the end reflects model choice rather than differences in setup. Hyperparameters are chosen by
+repeated cross-validation on the training set, the test set is evaluated exactly once, and the differences
+between models are checked for significance rather than assumed.
+
+The report closes by asking what these models would actually do at real-world celiac prevalence — which turns
+out to matter more than any accuracy figure in it.
 
 ---
 
 ## Data Source
 
-The dataset was obtained from Kaggle:  
-**Celiac Disease Lab Data**  
-https://www.kaggle.com/datasets/jackwin07/celiac-disease-coeliac-disease
+The dataset was obtained from Kaggle:
+**Celiac Disease Lab Data** — <https://www.kaggle.com/datasets/jackwin07/celiac-disease-coeliac-disease>
 
-To ensure balanced class representation, the dataset was shuffled and subsampled to include an equal number of diagnosed and non-diagnosed individuals.  
-This processed dataset was saved and reused to ensure reproducibility.
+To ensure balanced class representation, the dataset was shuffled and subsampled to include an equal number of
+diagnosed and non-diagnosed individuals (363 each, n = 726). That processed file is committed as
+`data/shuffled_data.csv`; the exact preparation steps are recorded in [`data/README.md`](data/README.md).
 
-```{r, include=FALSE}
-library(gmodels)
-library(C50)
-library(tidyverse) # data manipulation
-library(corrplot)
-library(gridExtra)
-library(GGally)
-library(cluster) # clustering algorithms 
-library(factoextra) # clustering algorithms and visualization
-library(ggplot2)
-library(ggrepel)
-library(cowplot)
-library(tidymodels) 
-library(modeldata)  # the cells data
-library(vip)        # variable importance plots
-library(caret)
-library(yardstick)
-```
-
-## Data Preparation
-
-To ensure a balanced dataset, the original Kaggle data was:
-
-1. Shuffled randomly  
-2. Subsampled to include:
-   - 363 diagnosed patients  
-   - 363 non-diagnosed patients  
-3. Cleaned to standardize categorical fields (e.g., Marsh score, diabetes type) 
-
-then the data was saved so it will remain the same.
-
-```{r}
-# data <- read.csv("C:\\Users\\yasmi\\uni\\yisomim\\celiac_disease_lab_data.csv")
-# filtered_no <- shuffled_data[shuffled_data$Disease_Diagnose == "no", ][1:363, ]
-# filtered_yes <- shuffled_data[shuffled_data$Disease_Diagnose == "yes", ][1:363, ]
-# combined_data <- rbind(filtered_no, filtered_yes)
-# shuffled_data <- data[sample(nrow(data)), ]
-# combined_data$Marsh <- gsub("marsh type", "", combined_data$Marsh)
-# combined_data$Marsh <- gsub("none", "0", combined_data$Marsh)
-# combined_data$Diabetes.Type <- gsub("Type ", "", combined_data$Diabetes.Type)
-# combined_data$Diabetes.Type <- gsub("None", NA, combined_data$Diabetes.Type)
-```
-
-## EDA
-Begin by inspecting the the dataset to:
-- Identify missing values  
-- Verify variable types  
-- Understand the distribution of clinical and laboratory features  
-
-```{r download data}
-# Read the CSV file
-
-celiac_data <- read.csv("C:\\Users\\yasmi\\uni\\yisomim\\shuffled_data.csv")
+```{r load-data}
+celiac_data <- read.csv("data/shuffled_data.csv")
 head(celiac_data, 10)
 ```
 
+## The features
 
-##The features
-PSS/DSS – types of growth delay. PSS is proportional and the other is not.
-IgM, IgG, IgM – immunoglobulins antibody in the blood. It means that the immune system is engaged.
-Doctors use Marsh scores to quantify the damage to your small intestinal from celiac disease. Your Marsh score will determine whether you have celiac disease, and how much it has damaged your intestinal villi.
-Cd_type – the types of Celiac of discussed earlier.
+- **PSS / DSS** — types of growth delay. PSS is proportionate, DSS is not.
+- **IgA, IgG, IgM** — immunoglobulin antibodies in the blood. Elevated levels mean the immune system is engaged.
+- **Marsh** — doctors use Marsh scores to quantify damage to the small intestine from celiac disease. The score
+  reflects how much the intestinal villi have been damaged.
+- **cd_type** — the clinical subtype of celiac disease.
 
-```{r}
-# look at summary of the data
+```{r summary}
 summary(celiac_data)
 ```
+
 ## Target Variable
 
-The target variable `Disease_Diagnose` indicates whether a patient has been diagnosed with celiac disease.
-This variable was converted into a factor for classification modeling.
+The target `Disease_Diagnose` indicates whether a patient has been diagnosed with celiac disease. It is
+converted to a factor for classification.
 
-```{r}
-# convert credit from character variable to factor
-celiac_data$Disease_Diagnose<-as.factor(celiac_data$Disease_Diagnose)
+```{r target}
+celiac_data$Disease_Diagnose <- as.factor(celiac_data$Disease_Diagnose)
 table(celiac_data$Disease_Diagnose)
 ```
-## Distribution of Numeric Features
-Histograms were generated to visualize the distributions of numeric values.  
-This step helps identify outliers, and scale differences between features.
-```{r}
-# Filter numeric columns
-numeric_columns <- celiac_data %>% select_if(is.numeric)
 
-# Save numeric columns to a new data frame
-numeric_df <- as.data.frame(numeric_columns)
-# Histogram Visualization
-numeric_df %>%
-  gather(attributes, value, 1:5) %>%
+## Distribution of Numeric Features
+
+Histograms help identify outliers and scale differences between features.
+
+```{r histograms, fig.width=8, fig.height=5}
+celiac_data %>%
+  select(where(is.numeric)) %>%
+  gather(attributes, value) %>%
   ggplot(aes(x = value)) +
-  geom_histogram(fill = 'lightblue', color = 'black') +
-  facet_wrap(~attributes, scales = 'free_x') +
+  geom_histogram(fill = "lightblue", color = "black", bins = 30) +
+  facet_wrap(~attributes, scales = "free_x") +
   labs(x = "Values", y = "Frequency") +
   theme_bw()
 ```
-Numeric features:
-We can see that the diabetes type is almost absolutely type 1.
-We see that there is no big diverge in the IgA values.
-Most of the samples are from relatively young – between 1-15.
 
+Observations:
+
+- Diabetes type is almost entirely type 1.
+- There is little spread in the IgA values.
+- Most patients are relatively young — roughly 1–15 years old.
 
 ## Clinical Subtypes of Celiac Disease
 
-The variable `cd_type` represents different clinical subtypes of celiac disease.  
-Only non-missing subtypes were examined to understand their frequency distribution.
+`cd_type` records the clinical subtype. Only diagnosed patients have a subtype, so `none` is excluded here.
 
-```{r}
+```{r cd-type, fig.width=6, fig.height=4}
 cd_type_only <- subset(celiac_data, cd_type != "none")
-# Assuming your column is called 'my_column' in the 'data' dataframe
-ggplot(cd_type_only, aes(x = cd_type_only$cd_type)) +
-  geom_bar() +
-  xlab("Values") +
-  ylab("Count") +
-  ggtitle("Count of Each Value")
+
+ggplot(cd_type_only, aes(x = cd_type)) +
+  geom_bar(fill = "lightblue", color = "black") +
+  labs(x = "Subtype", y = "Count", title = "Count of each celiac subtype") +
+  theme_bw()
+```
+
+```{r cd-type-pct}
+round(prop.table(table(cd_type_only$cd_type)) * 100, 1)
 ```
 
 ## Feature Engineering
 
-To prepare the data for modeling, the following transformations were applied:
+To prepare the data for modeling:
 
-- Marsh scores were converted into numeric form  
-- Binary clinical symptoms were encoded as 0/1  
-- Gender and diagnosis variables were binarized  
-- Variables with extensive missing values or redundant information were excluded  
+- Marsh scores were converted to numeric form (`3a` → `3.1`, `3b` → `3.2`, `3c` → `3.3`)
+- Binary clinical symptoms were encoded as 0/1
+- Gender and diagnosis were binarised
+- Columns with extensive missing values or redundant information were excluded
 
-These steps ensured compatibility with correlation analysis and machine learning models.
-
-```{r}
-# Calculate frequency of each cd_type
-cd_type_freq <- table(cd_type_only$cd_type)
-
-# Calculate percentages
-cd_type_percentage <- prop.table(cd_type_freq) * 100
-
-# Print the distribution in percentage form
-print(cd_type_percentage)
-```
-change the marsh to be numeric, and the binary features to be 0 and 1.
-```{r}
+```{r encode}
 numeric_celiac_data <- celiac_data
+
 numeric_celiac_data$Marsh <- gsub("a", ".1", numeric_celiac_data$Marsh)
 numeric_celiac_data$Marsh <- gsub("b", ".2", numeric_celiac_data$Marsh)
 numeric_celiac_data$Marsh <- gsub("c", ".3", numeric_celiac_data$Marsh)
-numeric_celiac_data$Diabetes <- ifelse(numeric_celiac_data$Diabetes == "Yes", 1, 0)
-numeric_celiac_data$Abdominal <- ifelse(numeric_celiac_data$Abdominal == "yes", 1, 0)
-numeric_celiac_data$Sticky_Stool <- ifelse(numeric_celiac_data$Sticky_Stool == "yes", 1, 0)
-numeric_celiac_data$Weight_loss <- ifelse(numeric_celiac_data$Weight_loss == "yes", 1, 0)
-numeric_celiac_data$Disease_Diagnose <- ifelse(numeric_celiac_data$Disease_Diagnose == "yes", 1, 0)
-numeric_celiac_data$Gender <- ifelse(numeric_celiac_data$Gender == "Female", 1, 0)
 numeric_celiac_data$Marsh <- as.numeric(numeric_celiac_data$Marsh)
-head(numeric_celiac_data,10)
 
+numeric_celiac_data$Diabetes         <- ifelse(numeric_celiac_data$Diabetes == "Yes", 1, 0)
+numeric_celiac_data$Abdominal        <- ifelse(numeric_celiac_data$Abdominal == "yes", 1, 0)
+numeric_celiac_data$Sticky_Stool     <- ifelse(numeric_celiac_data$Sticky_Stool == "yes", 1, 0)
+numeric_celiac_data$Weight_loss      <- ifelse(numeric_celiac_data$Weight_loss == "yes", 1, 0)
+numeric_celiac_data$Gender           <- ifelse(numeric_celiac_data$Gender == "Female", 1, 0)
+numeric_celiac_data$Disease_Diagnose <- ifelse(numeric_celiac_data$Disease_Diagnose == "yes", 1, 0)
+
+head(numeric_celiac_data, 10)
 ```
 
-```{r}
-# Save data frame to a CSV file
-#write.csv(numeric_celiac_data, file = "numeric_celiac_data.csv", row.names = FALSE)
+### Choosing one predictor set
+
+Every model below uses the same ten predictors. Three columns are dropped:
+
+- **`cd_type`** — only diagnosed patients have a subtype, so it encodes the label directly.
+- **`Diabetes.Type`** — `NA` for every non-diabetic patient and almost always `1` otherwise, so it adds no
+  information beyond `Diabetes`.
+- **`Diarrhoea`, `Short_Stature`** — multi-class categorical. KNN needs numeric input, and using them for the
+  tree but not for KNN would make the model comparison unfair.
+
+```{r feature-set}
+PREDICTORS <- c("Age", "Gender", "Diabetes", "Abdominal", "Sticky_Stool",
+                "Weight_loss", "IgA", "IgG", "IgM", "Marsh")
+
+model_data <- numeric_celiac_data %>%
+  select(all_of(PREDICTORS), Disease_Diagnose) %>%
+  mutate(Disease_Diagnose = factor(Disease_Diagnose,
+                                   levels = c(0, 1),
+                                   labels = c("healthy", "sick")))
+
+str(model_data)
 ```
 
 ## Feature Correlation Analysis
 
-A correlation matrix was computed for all numeric features to:
+```{r correlation, fig.width=7, fig.height=7}
+cor_data <- model_data %>%
+  mutate(Disease_Diagnose = as.numeric(Disease_Diagnose) - 1) %>%
+  cor()
 
-- Detect highly correlated predictors  
-- Identify potential redundancy  
-- Provide insight into relationships between laboratory measurements  
-
-```{r}
-# Filter numeric columns
-numeric_columns <- numeric_celiac_data %>% select_if(is.numeric)
-
-# Save numeric columns to a new data frame
-numeric_celiac_df <- as.data.frame(numeric_columns)
-#exclude the diabetes type because it doesnt give new information, and has a lot of NAs
-numeric_celiac_df <- subset(numeric_celiac_df, select = -Diabetes.Type)
-
-cor_data <- cor(numeric_celiac_df)
-corrplot(cor_data, method ='square')
+corrplot(cor_data, method = "square")
 ```
-Correlation table:
-As we anticipated most of the stomach issues are correlated together . 
-We can see that the two attributes that are most correlated with the disease diagnose are diabetes and marsh.
-There are more components that have correlation like abdominal pain, sticky stool and weight loss.
-In the correlation table we see correlation between diabetes and the different stomach issues.
-We searched online in order to rule out that these symptoms come from diabetes and so the correlation we see is the outcome from the correlation between diabetes and celiac. 
 
+As anticipated, most of the stomach-related symptoms are correlated with each other. The two features most
+correlated with the diagnosis are **Marsh** and **Diabetes**. Abdominal pain, sticky stool and weight loss also
+show correlation with the target.
 
+The correlation between diabetes and the stomach symptoms prompted a check of the literature, to rule out that
+these symptoms come from diabetes rather than from celiac disease.
 
-# Decition tree:
-Before training, removed cd-type before DC so we will not cheat.
-The dataset was then split into training (80%) and test (20%) sets using random sampling.
-```{r}
-# Assuming your dataset is stored in a variable called 'data'
-data_no_cd_type <- subset(celiac_data, select = -cd_type)
-data_no_cd_type$Disease_Diagnose<-as.factor(data_no_cd_type$Disease_Diagnose)
-# Consider setting a seed for reproducible results
+> **Note on `Marsh`.** The Marsh score is the histological grading used to *make* the celiac diagnosis in the
+> first place. Its strong correlation with the target is therefore partly circular. It is kept in the main
+> models as the strongest available predictor, but a model fitted without it appears at the end of the report.
+
+## Dimensionality Reduction (PCA)
+
+PCA is used to visualise separation between healthy and sick individuals. The features are on very different
+scales — `Age` spans decades while most symptoms are 0/1 — so the data is **scaled** before decomposition.
+Without scaling, the first component would simply track `Age`.
+
+```{r pca-variance}
+pca_fit <- prcomp(model_data[, PREDICTORS], scale. = TRUE)
+
+pct_var <- round(100 * summary(pca_fit)$importance[2, 1:2], 1)
+pct_var
+```
+
+```{r pca-diagnosis, fig.width=6.5, fig.height=5}
+pca_df <- data.frame(
+  PC1 = pca_fit$x[, 1],
+  PC2 = pca_fit$x[, 2],
+  Diagnosis = model_data$Disease_Diagnose,
+  Subtype   = celiac_data$cd_type
+)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, colour = Diagnosis)) +
+  geom_point(alpha = 0.7) +
+  labs(
+    title = "PCA of celiac lab features",
+    x = paste0("PC1 (", pct_var[1], "% variance)"),
+    y = paste0("PC2 (", pct_var[2], "% variance)")
+  ) +
+  theme_bw()
+```
+
+```{r pca-subtype, fig.width=6.5, fig.height=5}
+ggplot(pca_df, aes(x = PC1, y = PC2, colour = Subtype)) +
+  geom_point(alpha = 0.7) +
+  labs(
+    title = "PCA coloured by clinical subtype",
+    x = paste0("PC1 (", pct_var[1], "% variance)"),
+    y = paste0("PC2 (", pct_var[2], "% variance)")
+  ) +
+  theme_bw()
+```
+
+---
+
+## One Shared Train/Test Split
+
+The split is created **once** here and reused by all three models, so the comparison at the end is
+apples-to-apples.
+
+```{r split}
 set.seed(1234)
-```
-Lets split into training and test sets:
 
-```{r}
-# sample 580 observations out of the total 726, 80% 20% devision
-train_sample <- sample(726, 581)
+n_total <- nrow(model_data)
+train_idx <- sample(n_total, round(0.8 * n_total))
 
-# split into train/test
-celiac_train <- data_no_cd_type[train_sample, ]
-celiac_test <- data_no_cd_type[-train_sample, ]
+train_raw <- model_data[train_idx, ]
+test_raw  <- model_data[-train_idx, ]
 
-# check that we got about 30% defaulted loans in each dataset:
-prop.table(table(celiac_train$Disease_Diagnose))
-prop.table(table(celiac_test$Disease_Diagnose))
-```
-the tree before training:
-```{r}
+train_labels <- train_raw$Disease_Diagnose
+test_labels  <- test_raw$Disease_Diagnose
 
-# apply model in training data (17th column is the label to be predicted)
-celiac_model <- C5.0(celiac_train[-14], celiac_train$Disease_Diagnose)
-```
-apply the tree on the test data:
-```{r}
-# apply model on test data
-celiac_prediction <- predict(celiac_model, celiac_test)
+# sanity check: the split must be disjoint and cover every row
+stopifnot(
+  length(intersect(train_idx, seq_len(n_total)[-train_idx])) == 0,
+  nrow(train_raw) + nrow(test_raw) == n_total
+)
 
-CrossTable(celiac_test$Disease_Diagnose, celiac_prediction, prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE, dnn = c('actual Disease_Diagnose', 'predicted Disease_Diagnose'))
+c(train = nrow(train_raw), test = nrow(test_raw))
 ```
 
+Both sets stay close to the 50/50 balance of the full dataset:
 
-```{r}
-# boosting with 10 trials (on training)
-cliac_boost10 <- C5.0(celiac_train[-14], celiac_train$Disease_Diagnose, trials = 10, control = C5.0Control(CF = 0.2))
-```
-after train we see an improvement on the train data (from 13 mistakes to 4)
-now, we want to see how the trained model will preform on the test data.
-```{r}
-# boosting on test data
-celiac_boost_pred10 <- predict(cliac_boost10, celiac_test)
-
-CrossTable(celiac_test$Disease_Diagnose, celiac_boost_pred10,
-prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE,
-dnn = c('actual Disease_Diagnose', 'predicted Disease_Diagnose'), title = "result on test data")
+```{r split-balance}
+rbind(
+  train = prop.table(table(train_raw$Disease_Diagnose)),
+  test  = prop.table(table(test_raw$Disease_Diagnose))
+)
 ```
 
-```{r}
-png(file = "decision_tree.png", width = 2000, height = 1000)
-# Plot the decision tree without labels
-plot(cliac_boost10,type = "simple")
+### Normalisation fitted on the training set only
 
-# Save and close the PNG file
-dev.off()
+KNN is distance-based, so features must be on a common scale. The min and max are computed from the
+**training rows only** and then applied to the test rows — computing them over the full dataset would leak
+information about the test set into the model.
+
+Test values may therefore fall slightly outside `[0, 1]`; that is expected and correct.
+
+```{r normalize}
+train_min <- sapply(train_raw[, PREDICTORS], min)
+train_max <- sapply(train_raw[, PREDICTORS], max)
+
+apply_minmax <- function(df) {
+  as.data.frame(scale(df[, PREDICTORS],
+                      center = train_min,
+                      scale  = train_max - train_min))
+}
+
+train_norm <- apply_minmax(train_raw)
+test_norm  <- apply_minmax(test_raw)
+
+range(test_norm)
 ```
-From a clinical perspective false negatives (predicting healthy when the patient is sick)
-are more dangerous than false positives. So a panelty was added.
-#Add penalties
-First, we define dimensions:
-```{r}
-matrix_dimensions <- list(c("no", "yes"), c("no", "yes"))
-names(matrix_dimensions) <- c("predicted", "actual")
 
-matrix_dimensions
+Decision trees and random forests split on thresholds, so they are unaffected by any monotone rescaling. They
+are fitted on the unnormalised features; only KNN uses `train_norm` / `test_norm`.
+
+### A shared evaluation helper
+
+Every model is scored with the same function, so the summary table at the end is consistent.
+
+```{r eval-helper}
+CLASSES <- c("healthy", "sick")
+
+# forcing the levels keeps the matrix 2x2 even if a model never predicts one class
+confusion <- function(truth, pred) {
+  table(Predicted = factor(pred,  levels = CLASSES),
+        Actual    = factor(truth, levels = CLASSES))
+}
+
+eval_model <- function(name, truth, pred) {
+  cm <- confusion(truth, pred)
+  tibble(
+    Model             = name,
+    Accuracy          = sum(diag(cm)) / sum(cm),
+    Sensitivity       = cm["sick", "sick"] / sum(cm[, "sick"]),
+    Specificity       = cm["healthy", "healthy"] / sum(cm[, "healthy"]),
+    `False negatives` = cm["healthy", "sick"],
+    `False positives` = cm["sick", "healthy"]
+  )
+}
 ```
-We gave a higher cost for false negative. because of the affects of non treated CD.
-```{r}
-error_cost <- matrix(c(0, 1, 3 , 0), nrow = 2, dimnames = matrix_dimensions)
 
+---
+
+## Model Selection by Cross-Validation
+
+The hyperparameters below — `k` for KNN, `mtry` for the forest, and the false-negative cost ratio for C5.0 —
+were originally chosen by hand. Here they are selected properly, by **repeated 10-fold cross-validation on the
+training set only**. The test set is not touched until the final comparison.
+
+```{r cv-folds}
+set.seed(2024)
+folds <- vfold_cv(train_raw, v = 10, repeats = 5, strata = Disease_Diagnose)
+
+nrow(folds)  # 10 folds x 5 repeats
+```
+
+Each candidate is scored with the same loop. Note that the min-max scaler for KNN is refitted **inside every
+fold** from that fold's analysis rows — doing it once outside would leak the assessment rows' range into
+training, which is the bug this report fixed earlier. Putting it inside the loop makes that mistake structurally
+impossible to reintroduce.
+
+```{r cv-helper}
+cv_evaluate <- function(fit_predict) {
+  map_dfr(seq_len(nrow(folds)), function(i) {
+    sp <- folds$splits[[i]]
+    tr <- analysis(sp)
+    te <- assessment(sp)
+
+    cm <- confusion(te$Disease_Diagnose, fit_predict(tr, te))
+
+    tibble(
+      accuracy = sum(diag(cm)) / sum(cm),
+      sens     = cm["sick", "sick"] / sum(cm[, "sick"]),
+      fn       = cm["healthy", "sick"]
+    )
+  })
+}
+
+# mean and standard error across the 50 resamples
+cv_summarise <- function(res, label) {
+  res %>% summarise(
+    Setting     = label,
+    Accuracy    = mean(accuracy),
+    `Std error` = sd(accuracy) / sqrt(n()),
+    Sensitivity = mean(sens),
+    `Mean FN`   = mean(fn)
+  )
+}
+```
+
+### Tuning `k` for KNN
+
+```{r cv-knn, cache=TRUE}
+k_grid <- seq(1, 25, by = 2)
+
+knn_cv <- map_dfr(k_grid, function(k) {
+  cv_evaluate(function(tr, te) {
+    lo <- sapply(tr[, PREDICTORS], min)
+    hi <- sapply(tr[, PREDICTORS], max)
+    rng <- ifelse(hi - lo == 0, 1, hi - lo)     # guard against constant columns
+
+    tr_n <- scale(tr[, PREDICTORS], center = lo, scale = rng)
+    te_n <- scale(te[, PREDICTORS], center = lo, scale = rng)
+
+    knn(train = tr_n, test = te_n, cl = tr$Disease_Diagnose, k = k)
+  }) %>% cv_summarise(k)
+})
+
+best_k <- knn_cv$Setting[which.max(knn_cv$Accuracy)]
+knn_cv
+```
+
+Two things are worth noting rather than glossing over. First, `k = 1` winning is a mild warning sign: it usually
+means the classes are close to separable, which here is the `Marsh` effect again rather than a genuinely
+excellent nearest-neighbour structure. Second, the curve is flat — the spread across all values of k is only
+about two standard errors, so this choice is far less decisive than picking the maximum suggests.
+
+There is also a tension in the selection criterion: `k = 1` maximises accuracy, but `k = 9` produces noticeably
+fewer false negatives (1.18 vs 1.74 per fold). Since this project treats false negatives as the more costly
+error, `k = 9` is arguably the better choice. Accuracy is kept as the criterion here because selecting purely on
+false negatives is degenerate in general — a model that predicts "sick" for everyone scores zero — but the
+disagreement is real and is revisited in the limitations.
+
+```{r cv-knn-plot, fig.width=6.5, fig.height=4}
+ggplot(knn_cv, aes(x = Setting, y = Accuracy)) +
+  geom_ribbon(aes(ymin = Accuracy - 1.96 * `Std error`,
+                  ymax = Accuracy + 1.96 * `Std error`), alpha = 0.2) +
+  geom_line() + geom_point() +
+  geom_vline(xintercept = best_k, linetype = "dashed", colour = "firebrick") +
+  labs(title = paste0("KNN: cross-validated accuracy by k (best = ", best_k, ")"),
+       x = "k", y = "CV accuracy ± 1.96 SE") +
+  theme_bw()
+```
+
+### Tuning `mtry` for the random forest
+
+```{r cv-rf, cache=TRUE}
+mtry_grid <- 1:6
+
+rf_cv <- map_dfr(mtry_grid, function(m) {
+  cv_evaluate(function(tr, te) {
+    fit <- ranger::ranger(Disease_Diagnose ~ ., data = tr[, c(PREDICTORS, "Disease_Diagnose")],
+                          num.trees = 500, mtry = m, seed = 234)
+    predict(fit, te)$predictions
+  }) %>% cv_summarise(m)
+})
+
+best_mtry <- rf_cv$Setting[which.max(rf_cv$Accuracy)]
+rf_cv
+```
+
+### Tuning the C5.0 false-negative cost ratio
+
+Accuracy is the wrong objective here — the point of the cost matrix is to trade false positives for false
+negatives, so the ratio is chosen on **mean false negatives per fold**, with accuracy reported alongside to show
+what that costs.
+
+```{r cv-cost, cache=TRUE}
+cost_grid <- c(1, 2, 3, 5, 10)
+
+cost_cv <- map_dfr(cost_grid, function(r) {
+  cv_evaluate(function(tr, te) {
+    costs <- matrix(c(0, r, 1, 0), nrow = 2,
+                    dimnames = list(actual = CLASSES, predicted = CLASSES))
+    fit <- C5.0(tr[, PREDICTORS], tr$Disease_Diagnose, trials = 10, costs = costs)
+    predict(fit, te)
+  }) %>% cv_summarise(r)
+})
+
+best_cost <- cost_cv$Setting[which.min(cost_cv$`Mean FN`)]
+cost_cv
+```
+
+The trade-off is visible in the table: false negatives fall steadily as the ratio rises, while accuracy peaks
+around 3 and then declines. Selecting on false negatives picks the most aggressive ratio and knowingly gives up
+about a point of accuracy — which is the entire point of using a cost matrix.
+
+```{r cv-selected}
+tibble(
+  Parameter = c("KNN k", "Forest mtry", "C5.0 cost ratio"),
+  Selected  = c(best_k, best_mtry, best_cost)
+)
+```
+
+These selected values are used for every model fitted below.
+
+---
+
+## Decision Tree (C5.0)
+
+```{r tree-fit}
+celiac_model <- C5.0(train_raw[, PREDICTORS], train_labels)
+celiac_prediction <- predict(celiac_model, test_raw)
+
+CrossTable(test_labels, celiac_prediction,
+           prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE,
+           dnn = c("actual", "predicted"))
+```
+
+### Boosting
+
+```{r tree-boost}
+celiac_boost10 <- C5.0(train_raw[, PREDICTORS], train_labels,
+                       trials = 10, control = C5.0Control(CF = 0.2))
+
+celiac_boost_pred10 <- predict(celiac_boost10, test_raw)
+
+CrossTable(test_labels, celiac_boost_pred10,
+           prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE,
+           dnn = c("actual", "predicted"))
+```
+
+```{r tree-plot, fig.width=20, fig.height=10}
+plot(celiac_boost10, type = "simple", trial = 0)
+```
+
+### Adding a cost matrix
+
+Clinically, a false negative (predicting healthy when the patient is sick) is more dangerous than a false
+positive, so it is given three times the cost.
+
+**Watch the orientation.** `C5.0()` expects the cost matrix indexed as `[actual, predicted]` — rows are the
+true class, columns are the predicted one. Several textbook examples label the dimensions the other way round,
+and since the labels are only cosmetic, a transposed matrix fails silently: it penalises false *positives* while
+appearing to penalise false negatives. Here that would push false negatives up rather than down.
+
+The false-negative cell is therefore *actual = sick, predicted = healthy*, i.e. row `sick`, column `healthy`.
+
+```{r cost-matrix}
+matrix_dimensions <- list(actual = CLASSES, predicted = CLASSES)
+
+# column-major fill puts best_cost at [sick, healthy] = actual sick, predicted healthy = false negative
+error_cost <- matrix(c(0, best_cost, 1, 0), nrow = 2, dimnames = matrix_dimensions)
 error_cost
 ```
-Now lets train again and see if the cost matrix made any difference:
-```{r}
-# apply model on training data with cost matrix
-celiac_cost_10 <- C5.0(celiac_train[-14], celiac_train$Disease_Diagnose, trials = 10 ,costs = error_cost)
 
+```{r tree-cost}
+celiac_cost_10 <- C5.0(train_raw[, PREDICTORS], train_labels,
+                       trials = 10, costs = error_cost)
+
+celiac_cost_pred <- predict(celiac_cost_10, test_raw)
+
+CrossTable(test_labels, celiac_cost_pred,
+           prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE,
+           dnn = c("actual", "predicted"))
 ```
 
-```{r}
-# predict on train data
-celiac_cost_train_pred <- predict(celiac_cost_10, celiac_train)
+The penalty works: false negatives fall from 5 to 2 on the test set, and — unusually for a cost-sensitive
+model — overall accuracy *improves* rather than trading off. The remaining errors are mostly false positives,
+which in this setting means recommending a confirmatory test for a patient who turns out to be healthy: the
+much cheaper mistake.
 
-CrossTable(celiac_train$Disease_Diagnose, celiac_cost_train_pred, prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE, dnn = c('actual Disease_Diagnose', 'predicted Disease_Diagnose'))
-```
-after the penalty we couldn't better results. we couldn't get under 1 false negative. 
+A note on what cross-validation changed here. An earlier version of this report hand-picked a 3:1 ratio and got
+**zero** false negatives on this test set. That looked like the headline result, but it did not survive proper
+tuning: cross-validation selects a 10:1 ratio, and the honest test-set score is 2 false negatives, not 0. The
+perfect result was partly luck in a single 145-patient split — exactly the kind of overstatement that repeated
+resampling exists to catch.
 
-```{r}
-png(file = "decision_tree_with_weights.png", width = 2000, height = 1000)
-# Plot the decision tree without labels
-plot(celiac_cost_10,type = "simple")
-
-# Save and close the PNG file
-dev.off()
-```
-##Dimensionality reduction(PCA)
-PCA was applied to visualize:
-- Separation between healthy and sick individuals  
-- Clustering patterns by clinical subtype (`cd_type`)  
-```{r}
-# Perform PCA on the data
-prcomp_celiac <- prcomp(numeric_celiac_df[, 1:10])
-pca_celiac <- data.frame(
-  PC1 = prcomp_celiac$x[, 1],
-  PC2 = prcomp_celiac$x[, 2],
-  classification = numeric_celiac_df$Disease_Diagnose
-)
-
-# Create the scatterplot of PCA results
-ggplot(pca_celiac, aes(x = PC1, y = PC2, col = classification)) +
-  geom_point() +
-  ggrepel::geom_text_repel(aes(label = classification), cex = 2.5)
-
+```{r tree-cost-plot, fig.width=20, fig.height=10}
+plot(celiac_cost_10, type = "simple", trial = 0)
 ```
 
+---
 
-```{r}
-# Perform PCA on the data
-prcomp_celiac <- prcomp(numeric_celiac_df[, 1:10])
-pca_celiac <- data.frame(
-  PC1 = prcomp_celiac$x[, 1],
-  PC2 = prcomp_celiac$x[, 2],
-  classification = numeric_celiac_data$cd_type
-)
+## K-Nearest Neighbors
 
-# Create the scatterplot of PCA results
-ggplot(pca_celiac, aes(x = PC1, y = PC2, col = classification)) +
-  geom_point() +
-  ggrepel::geom_text_repel(aes(label = classification), cex = 2.5)
+KNN is a simple distance-based baseline, fitted on the normalised features using the cross-validated value of
+k selected above.
 
+```{r knn}
+knn_pred <- knn(train = train_norm, test = test_norm, cl = train_labels, k = best_k)
+
+CrossTable(x = test_labels, y = knn_pred, prop.chisq = FALSE,
+           dnn = c("actual", "predicted"))
 ```
 
-#KNN:
-Before applying KNN, all numeric features were normalized using min–max scaling.  
-The dataset was then split into training and test sets.
+---
 
-KNN was evaluated as a simple, distance-based baseline classifier.
-first preprocess the data:
-```{r}
-head(numeric_celiac_df,5)
-numeric_celiac_df$Disease_Diagnose <- factor(numeric_celiac_df$Disease_Diagnose, levels = c("0", "1"), labels = c("healthy", "sick"))
-```
-normelize
-```{r}
-# create the min/max normalization function:
-normalize <- function(x) {
-return ((x - min(x)) / (max(x) - min(x)))
-}
-numeric_celiac_df_n <- as.data.frame(lapply(numeric_celiac_df[1:10], normalize))
-```
+## Random Forest
 
-```{r}
-# sample 580 observations out of the total 726, 80% 20% devision
-train_sample <- sample(726, 581)
+A random forest should reduce the overfitting of a single tree and generalise better, and gives feature
+importance for free.
 
-# split into train/test
-c_train <- numeric_celiac_df_n[train_sample, ]
-c_test <- numeric_celiac_df_n[-train_sample, ]
+```{r rf-fit}
+rf_train <- train_raw   # already contains Disease_Diagnose alongside the predictors
 
-# labels of train set
-c_train_labels <- numeric_celiac_df[train_sample, 11]
-# labels of test set
-c_test_labels <- numeric_celiac_df[-train_sample, 11]
-```
-
-```{r}
-library(class)
-library(gmodels)
-```
-
-```{r}
-c_test_pred <- knn(train = c_train, test = c_test, cl = c_train_labels, k=7)
-CrossTable(x = c_test_labels, y = c_test_pred, prop.chisq=FALSE)
-```
-
-#random forest:
-To improve upon the limitations of a single decision tree.
-
-- Reduced overfitting  
-- Improved generalization  
-- Built-in feature importance  
-```{r}
-# create random forest model
-rf_mod <- 
-  rand_forest(trees = 1000) %>% 
-  set_engine("ranger") %>%   # engine - method of estimation the model will use
+rf_mod <-
+  rand_forest(trees = 1000, mtry = best_mtry) %>%
+  set_engine("ranger", importance = "impurity") %>%
   set_mode("classification")
-```
 
-```{r}
 set.seed(234)
-rf_fit <- 
-  rf_mod %>% 
-  fit(c_train_labels ~ ., data = c_train)
+rf_fit <- rf_mod %>% fit(Disease_Diagnose ~ ., data = rf_train)
 ```
-The accuracy of the training set was quite high, possibly even overly so. Therefore, we proceeded to assess the accuracy on the test set.
-```{r}
-rf_testing_pred <- 
-  predict(rf_fit, c_test) %>% 
-  bind_cols(predict(rf_fit, c_test, type = "prob")) %>% 
-  bind_cols(Label = c_test_labels)
 
-# Accuracy calculation
-rf_testing_pred %>%                   # test set predictions
-  accuracy(truth = Label, .pred_class)
+```{r rf-predict}
+rf_testing_pred <-
+  predict(rf_fit, test_raw) %>%
+  bind_cols(predict(rf_fit, test_raw, type = "prob")) %>%
+  bind_cols(Label = test_labels)
+
+rf_testing_pred %>% accuracy(truth = Label, .pred_class)
 ```
-The model achieved a high level of accuracy on the test set too. We displayed the final ROC curve to evaluate whether the achieved model performance is satisfactory, or if there is a need to implement additional enhancements.
-```{r}
-# Calculate ROC curve for training data
-roc_curve_testing <- rf_testing_pred %>%
-  roc_curve(truth = Label, .pred_healthy)  # Replace with the correct column name for class "Yes" probabilities
 
-# Visualize ROC curve for training data
-autoplot(roc_curve_testing)
+### ROC curve
+
+`Label` has levels `healthy`, `sick`. `yardstick` treats the **first** level as the event by default, so the
+curve is drawn against `.pred_healthy`.
+
+```{r rf-roc, fig.width=5.5, fig.height=5}
+rf_testing_pred %>%
+  roc_curve(truth = Label, .pred_healthy) %>%
+  autoplot()
 ```
-the model preform well on the data. Lastly, to compare the models, we showcased their performance on the test set.
-```{r}
-# Make predictions on training data
-predicted_labels <- rf_testing_pred$.pred_class
 
-# Calculate confusion matrix
-confusion_matrix <- confusionMatrix(predicted_labels, c_test_labels)
-
-# Print the confusion matrix
-print(confusion_matrix$table)
+```{r rf-auc}
+rf_testing_pred %>% roc_auc(truth = Label, .pred_healthy)
 ```
-as we can see there is a noticeable enhancement in the diagnostic results compared to the decision tree.
 
+### Feature importance
 
-## Model Comparison and Conclusions
+```{r rf-vip, fig.width=6.5, fig.height=4.5}
+vip(rf_fit, num_features = 10) +
+  labs(title = "Random forest feature importance") +
+  theme_bw()
+```
 
-Across all evaluated models:
+`Marsh` dominates — which is exactly the circularity flagged earlier. The next section quantifies how much of
+the performance depends on it.
 
-- The decision tree was interpretable but underperformed  
-- KNN achieved moderate performance  
-- The random forest achieved the best overall accuracy and ROC performance  
+---
 
-Most importantly, the random forest substantially reduced false negatives,  
-making it the most clinically appropriate model for this task.
+## How Much of the Performance is `Marsh`?
 
+The Marsh score is the histological criterion clinicians use to diagnose celiac disease. A model built on it is
+close to predicting the label from the label. To see what the other features contribute on their own, the same
+random forest is refitted with `Marsh` removed.
 
-## Next steps
-- Cross-validation instead of a single train/test split  
-- Hyperparameter tuning  
-- Feature importance analysis  
-- External validation on an independent dataset  
-Next, we want to investigate if different symptoms are In correlation with different types of celiac.
-We want to see if we can find a better model to diagnose celiac.
-Can we divide the data to more classes other than sick or healthy (without the labels).
+```{r rf-no-marsh}
+train_no_marsh <- train_raw %>% select(-Marsh)
+test_no_marsh  <- test_raw  %>% select(-Marsh)
 
+set.seed(234)
+rf_fit_no_marsh <- rf_mod %>% fit(Disease_Diagnose ~ ., data = train_no_marsh)
+
+rf_no_marsh_pred <- predict(rf_fit_no_marsh, test_no_marsh)$.pred_class
+
+eval_model("Random forest (no Marsh)", test_labels, rf_no_marsh_pred)
+```
+
+```{r rf-no-marsh-vip, fig.width=6.5, fig.height=4.5}
+vip(rf_fit_no_marsh, num_features = 9) +
+  labs(title = "Feature importance without Marsh") +
+  theme_bw()
+```
+
+---
+
+## Model Comparison
+
+All rows below are computed on the **same 145 test patients** using the **same ten predictors**.
+
+```{r comparison}
+comparison <- bind_rows(
+  eval_model("Decision tree (C5.0)",           test_labels, celiac_prediction),
+  eval_model("C5.0 + boosting (10 trials)",    test_labels, celiac_boost_pred10),
+  eval_model("C5.0 + boosting + cost matrix",  test_labels, celiac_cost_pred),
+  eval_model(paste0("KNN (k = ", best_k, ")"), test_labels, knn_pred),
+  eval_model("Random forest (1000 trees)",     test_labels, rf_testing_pred$.pred_class),
+  eval_model("Random forest (no Marsh)",       test_labels, rf_no_marsh_pred)
+)
+
+comparison %>% mutate(across(c(Accuracy, Sensitivity), ~ round(.x, 3)))
+```
+
+```{r comparison-plot, fig.width=7, fig.height=4}
+comparison %>%
+  mutate(Model = factor(Model, levels = rev(Model))) %>%
+  ggplot(aes(x = `False negatives`, y = Model)) +
+  geom_col(fill = "lightblue", color = "black") +
+  labs(title = "False negatives by model (lower is better)",
+       x = "False negatives on the test set", y = NULL) +
+  theme_bw()
+```
+
+### Are these differences real?
+
+A gap of one or two patients out of 145 is easy to over-read. **McNemar's test** compares two classifiers on the
+*same* test cases by looking only at the cases where they disagree, which is the appropriate test for paired
+predictions.
+
+```{r mcnemar}
+mcnemar_compare <- function(name_a, pred_a, name_b, pred_b) {
+  tab <- table(A = pred_a == test_labels, B = pred_b == test_labels)
+  p   <- mcnemar.test(tab)$p.value
+  tibble(
+    Comparison   = paste(name_a, "vs", name_b),
+    `A only correct` = tab["TRUE", "FALSE"],
+    `B only correct` = tab["FALSE", "TRUE"],
+    `p value`    = round(p, 3)
+  )
+}
+
+bind_rows(
+  mcnemar_compare("Cost-sensitive C5.0", celiac_cost_pred, "Random forest", rf_testing_pred$.pred_class),
+  mcnemar_compare("Cost-sensitive C5.0", celiac_cost_pred, "Decision tree",  celiac_prediction),
+  mcnemar_compare("Random forest",       rf_testing_pred$.pred_class, "KNN", knn_pred)
+)
+```
+
+The discordant counts are small, so these comparisons have very little statistical power. Read the p-values as
+*"this test set cannot distinguish these models"* rather than as evidence they perform equally — with 145
+patients, only a large difference would reach significance. The cross-validated estimates earlier in the report,
+averaged over 50 resamples, are the more reliable basis for choosing between them.
+
+---
+
+## What Happens at Realistic Prevalence
+
+Every accuracy figure above was measured on a dataset that is **50% celiac by construction**. Real celiac
+prevalence in the general population is roughly **1%** (Singh et al., *Clin Gastroenterol Hepatol* 2018, pooled
+seroprevalence ~1.4%, biopsy-confirmed ~0.7%). That gap matters more than it first appears.
+
+Sensitivity and specificity are properties of the classifier and do not depend on prevalence. **Precision — the
+positive predictive value — does.** So the models can be projected onto a realistic population directly from
+their sensitivity and specificity, without refitting anything:
+
+$$\text{PPV} = \frac{\text{sens} \times p}{\text{sens} \times p + (1-\text{spec}) \times (1-p)}
+\qquad
+\text{NPV} = \frac{\text{spec} \times (1-p)}{\text{spec} \times (1-p) + (1-\text{sens}) \times p}$$
+
+```{r prevalence-helpers}
+ppv_at <- function(sens, spec, p) (sens * p) / (sens * p + (1 - spec) * (1 - p))
+npv_at <- function(sens, spec, p) (spec * (1 - p)) / (spec * (1 - p) + (1 - sens) * p)
+```
+
+Sanity check — at the dataset's own prevalence the formula must reproduce the observed precision:
+
+```{r prevalence-check}
+best     <- comparison %>% filter(Model == "C5.0 + boosting + cost matrix")
+cm_best  <- confusion(test_labels, celiac_cost_pred)
+obs_prev <- mean(test_labels == "sick")
+
+round(c(
+  from_formula = ppv_at(best$Sensitivity, best$Specificity, obs_prev),
+  from_matrix  = cm_best["sick", "sick"] / sum(cm_best["sick", ])
+), 4)
+```
+
+### Predictive value across prevalence
+
+```{r prevalence-table}
+prevalences <- c(0.005, 0.01, 0.05, 0.50)
+
+comparison %>%
+  filter(Model %in% c("C5.0 + boosting + cost matrix", "Random forest (1000 trees)")) %>%
+  rowwise() %>%
+  reframe(
+    Model, Prevalence = prevalences,
+    PPV = ppv_at(Sensitivity, Specificity, prevalences),
+    NPV = npv_at(Sensitivity, Specificity, prevalences)
+  ) %>%
+  mutate(across(c(PPV, NPV), ~ round(.x, 3)),
+         Prevalence = scales::percent(Prevalence, accuracy = 0.1))
+```
+
+```{r prevalence-curve, fig.width=7, fig.height=4.5}
+curve_df <- comparison %>%
+  filter(Model %in% c("C5.0 + boosting + cost matrix", "Random forest (1000 trees)")) %>%
+  rowwise() %>%
+  reframe(Model, p = 10^seq(-3, log10(0.5), length.out = 200)) %>%
+  left_join(comparison %>% select(Model, Sensitivity, Specificity), by = "Model") %>%
+  mutate(PPV = ppv_at(Sensitivity, Specificity, p))
+
+ggplot(curve_df, aes(x = p, y = PPV, colour = Model)) +
+  geom_line(linewidth = 0.9) +
+  geom_vline(xintercept = 0.01, linetype = "dashed", colour = "firebrick") +
+  geom_vline(xintercept = 0.50, linetype = "dotted") +
+  annotate("text", x = 0.011, y = 0.05, label = "real prevalence ~1%",
+           hjust = 0, size = 3.2, colour = "firebrick") +
+  annotate("text", x = 0.5, y = 0.05, label = "this dataset (50%)",
+           hjust = 1.05, size = 3.2) +
+  scale_x_log10(labels = scales::percent) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  labs(title = "Precision collapses at realistic prevalence",
+       x = "Disease prevalence (log scale)", y = "Positive predictive value") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+### Why accuracy is the wrong headline
+
+At 1% prevalence, a model that simply predicts "healthy" for everyone achieves **99% accuracy** — better than
+anything reported above — while finding zero cases. Accuracy on a balanced sample says almost nothing about
+performance as a screening tool.
+
+The honest reading of these models is:
+
+- **NPV stays near 100%.** A negative result is highly trustworthy.
+- **PPV falls sharply.** At 1% prevalence most positive flags would be false alarms.
+
+That combination describes a **rule-out screening test**, not a diagnostic one: useful for deciding who does
+*not* need a biopsy, not for confirming who has celiac disease. Given that biopsy is the confirmatory step
+anyway, that is a reasonable role — but it is a much narrower claim than
+"`r scales::percent(best$Accuracy, accuracy = 0.1)` accurate".
+
+---
+
+## Conclusions
+
+- **The cost-sensitive boosted tree and tuned KNN tie for best**, both at 97.2% accuracy with 2 false negatives
+  and 2 false positives. Encoding the clinical asymmetry into C5.0 training works — it takes false negatives
+  from 5 to 2 while *improving* accuracy.
+- **No difference between the top models is statistically significant.** McNemar's test on the paired
+  predictions gives p ≈ 0.07 at best. With 145 patients, this test set cannot separate them; the
+  cross-validated estimates over 50 resamples are the more trustworthy comparison.
+- The random forest did **not** come out ahead (93.8%, 7 false negatives). An earlier version of this analysis
+  concluded that it did — an artefact of scoring each model on a different train/test split and a different
+  feature set. Once the comparison is fair, the advantage disappears.
+- **The headline accuracy is inflated by `Marsh`.** Dropping it costs about seven points of accuracy and
+  triples the false positives, showing how much apparent performance comes from a feature that is essentially
+  part of the diagnosis itself.
+- **At realistic prevalence these models are rule-out tools, not diagnostics.** Precision falls from ~97% on
+  this balanced sample to roughly **23% at 1% prevalence**, while NPV stays at ~100%. A negative result is
+  trustworthy; a positive one mostly is not.
+
+Several of these conclusions reverse what the first version of this report claimed, and every reversal came
+from fixing methodology rather than changing a model: sharing one split and feature set, correcting the
+orientation of the cost matrix, tuning by cross-validation instead of by hand, and testing whether the
+differences were real. Notably, the earlier "zero false negatives" result did not survive proper tuning.
+
+## Limitations
+
+- **Target leakage.** `Marsh` is the histological grading used to make the diagnosis, so the main models are
+  partly predicting the label from the label.
+- **A small test set.** Hyperparameters are now chosen by repeated cross-validation, but the final comparison
+  still rests on 145 patients, and McNemar's test confirms it cannot separate the leading models. Treat the
+  ranking as provisional.
+- **Artificially balanced sample.** n = 726, subsampled to 50/50, so headline accuracy does not transfer to a
+  screening population — see the prevalence section for what it becomes at a realistic base rate.
+- **Selection criteria are not fully consistent.** `k` and `mtry` are chosen on accuracy while the cost ratio is
+  chosen on false negatives. For KNN specifically, `k = 9` would roughly halve false negatives at a cost of one
+  accuracy point; a single, explicitly clinical objective would be more coherent.
+- **Tuning and final evaluation share a training set.** The split is honest — the test set is touched once — but
+  a fully nested cross-validation would give a less optimistic estimate still.
+- **No external validation** on an independent cohort.
+- This is a learning exercise. The models are not suitable for clinical use.
+
+## Next Steps
+
+- Nested cross-validation, so the performance estimate is not conditioned on a single outer split
+- A single explicit objective (e.g. expected cost, or sensitivity at fixed specificity) used to select every
+  hyperparameter, resolving the inconsistency noted above
+- Decision-threshold analysis on predicted probabilities, replacing the discrete cost ratio with a full
+  precision–recall trade-off curve
+- One-hot encode `Diarrhoea` and `Short_Stature` so they can be used without breaking KNN
+- Investigate whether different symptoms correlate with different celiac subtypes
+- Unsupervised clustering, to see whether the data splits into more than two groups without the labels
+- External validation on an independent dataset
