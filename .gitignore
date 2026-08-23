@@ -1,0 +1,28 @@
+# R session artifacts
+.Rhistory
+.RData
+.Rapp.history
+.Ruserdata
+
+# RStudio
+.Rproj.user/
+*.Rproj
+
+# knitr / rmarkdown intermediates
+celiac_project_cache/
+celiac_project_files/
+*_cache/
+*.knit.md
+*.utf8.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# The dataset is NOT redistributable -- the Kaggle source carries an "Unknown"
+# license, so no redistribution rights were granted. Download it yourself and
+# place it here; see data/README.md for the link and preparation steps.
+data/*.csv
+
+# Note: figures/ is intentionally NOT ignored -- the rendered plots are
+# committed so celiac_project.md displays correctly on GitHub.
