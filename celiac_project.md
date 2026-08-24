@@ -1220,9 +1220,11 @@ narrower claim than “97.2% accurate”.
   and a different feature set. Once the comparison is fair, the
   advantage disappears.
 - **The headline accuracy is inflated by `Marsh`.** Dropping it costs
-  about seven points of accuracy and triples the false positives,
-  showing how much apparent performance comes from a feature that is
-  essentially part of the diagnosis itself.
+  the forest about three and a half points of accuracy (93.8% → 90.3%)
+  and more than triples its false positives (2 → 7). Notably,
+  sensitivity is *unchanged* at 0.918 — the damage is entirely to
+  specificity. Without the histological score the model still finds the
+  same cases, but flags many more healthy patients along with them.
 - **At realistic prevalence these models are rule-out tools, not
   diagnostics.** Precision falls from ~97% on this balanced sample to
   roughly **23% at 1% prevalence**, while NPV stays at ~100%. A negative

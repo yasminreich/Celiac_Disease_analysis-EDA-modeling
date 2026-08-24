@@ -38,9 +38,10 @@ models. The ranking is provisional, and the report says so rather than crowning 
 
 **1. `Marsh` partly leaks the target.** The Marsh score is the histological grading clinicians use to *make* the
 celiac diagnosis, so a model built on it is close to predicting the label from the label. It dominates feature
-importance by a wide margin. Removing it costs about four points of accuracy and quadruples false positives —
-the last row of the table is the more honest estimate of what the remaining lab values and symptoms predict on
-their own.
+importance by a wide margin. Removing it costs the forest about three and a half points of accuracy
+(93.8% → 90.3%) and more than triples its false positives (2 → 7), while leaving sensitivity *unchanged* at
+0.918 — the damage is entirely to specificity. The last row of the table is the more honest estimate of what the
+remaining lab values and symptoms predict on their own.
 
 ![Feature importance](figures/rf-vip-1.png)
 

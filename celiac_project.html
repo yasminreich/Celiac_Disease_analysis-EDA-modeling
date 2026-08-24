@@ -2508,10 +2508,12 @@ did — an artefact of scoring each model on a different train/test split
 and a different feature set. Once the comparison is fair, the advantage
 disappears.</li>
 <li><strong>The headline accuracy is inflated by
-<code>Marsh</code>.</strong> Dropping it costs about seven points of
-accuracy and triples the false positives, showing how much apparent
-performance comes from a feature that is essentially part of the
-diagnosis itself.</li>
+<code>Marsh</code>.</strong> Dropping it costs the forest about three
+and a half points of accuracy (93.8% → 90.3%) and more than triples its
+false positives (2 → 7). Notably, sensitivity is <em>unchanged</em> at
+0.918 — the damage is entirely to specificity. Without the histological
+score the model still finds the same cases, but flags many more healthy
+patients along with them.</li>
 <li><strong>At realistic prevalence these models are rule-out tools, not
 diagnostics.</strong> Precision falls from ~97% on this balanced sample
 to roughly <strong>23% at 1% prevalence</strong>, while NPV stays at
